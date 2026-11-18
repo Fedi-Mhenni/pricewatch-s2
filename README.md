@@ -1,63 +1,72 @@
-# PriceWatch · Kit de la séance 2 : le job sous contrainte
+# PriceWatch · TP2 : le job sous contrainte
 
-Le job `job/import_prix.py` lit l'historique brut des relevés de prix (3 millions de lignes,
-environ 230 Mo) et calcule les statistiques mensuelles par produit et par magasin depuis 2020.
-Il écrit le résultat dans `data/out/monthly.csv`.
+Objectif : faire tenir le job d'import dans 256 Mo de RAM et 1 CPU, en moins de 30 s, sans changer son résultat.
+Mesures et justifications : voir `SOBRIETE.md`.
 
-Il fonctionne, mais il consomme beaucoup. Votre mission : le faire tenir dans
-**256 Mo de RAM et 1 CPU, en moins de 30 secondes**, sans changer son résultat.
+## Commandes utilisées
 
-## 1. Démarrer
+### Construire l'image
 
     docker build -t pw-job .
 
-    # Générer les données (une seule fois, ~10 s, ~230 Mo)
+Construit l'image `pw-job` à partir du Dockerfile. À refaire après chaque modification du script (le Dockerfile copie `job/`).
+
+### Générer les données (une seule fois)
+
     docker run --rm -v "$PWD/data:/data" pw-job python job/generate_history.py
 
-    # Lancer le job, sans limite
-    docker run --rm -v "$PWD/data:/data" pw-job
+Lance le script dans un conteneur. `-v` branche mon dossier `data/` sur `/data` : le fichier de 231 Mo reste sur ma machine après la fin du conteneur. `--rm` supprime le conteneur ensuite.
+Appris : un conteneur est jetable, un volume permet de garder les données.
 
-Sous Windows PowerShell, écrivez `${PWD}` au lieu de `$PWD`.
+### Mesurer la ligne de base (sans limite)
 
-À la fin, le job affiche trois mesures : temps réel, temps CPU (et le ratio CPU / réel), pic de RAM.
-Notez-les dans `SOBRIETE.md`.
+    docker run --name pw -v "$PWD/data:/data" pw-job
 
-## 2. Lancer sous contrainte
+Appris : 1580 Mo de pic et un ratio CPU / réel de 1,07, donc un job qui calcule, avec la RAM comme problème.
 
-    docker run --name pw --memory=256m --memory-swap=256m --cpus=1 \
-      -v "$PWD/data:/data" pw-job
+### Garder la référence
 
-    docker inspect --format 'Code de sortie : {{.State.ExitCode}} · OOMKilled : {{.State.OOMKilled}}' pw
+    cp data/out/monthly.csv data/out/reference.csv
+    cmp data/out/monthly.csv data/out/reference.csv
+
+Copie le résultat correct, puis compare octet par octet après chaque modification.
+Appris : un seul écart d'un centime (ligne 8353) après les morceaux, toléré par l'énoncé.
+
+### Lancer sous contrainte
+
+    docker run --name pw --memory=256m --memory-swap=256m --cpus=1 -v "$PWD/data:/data" pw-job
+
+`--memory` plafonne la RAM, `--memory-swap` égal interdit le swap, `--cpus` limite le temps de processeur.
+
+### Lire la fin d'un conteneur
+
+    docker inspect --format '{{.State.ExitCode}} {{.State.OOMKilled}}' pw
     docker rm pw
 
-`--memory-swap` égal à `--memory` interdit le swap : le conteneur ne peut pas « tricher » sur le disque.
+Donne le code de sortie et si le conteneur a été tué pour manque de mémoire. `rm` libère le nom `pw`.
+Appris : 137 + `true` = tué (SIGKILL, 128 + 9). La RAM est incompressible : tué. Avec `--cpus=0.5`, le job finit (56,5 s) : le CPU est compressible, il est freiné.
 
-## 3. Observer en direct
-
-Dans un second terminal, pendant que le job tourne :
+### Observer en direct
 
     docker stats
 
-Colonnes utiles : `CPU %` (100 % = un cœur entier) et `MEM USAGE / LIMIT`.
+(dans un 2e terminal) Affiche CPU % et mémoire utilisée / limite d'un conteneur en cours.
 
-## 4. Les règles
+### Dimensionner
 
-Vous pouvez modifier :
-- `job/import_prix.py`, **sauf le bloc « Mesures »** en fin de fichier ;
-- `requirements.txt` et `Dockerfile`, si vous le justifiez dans `SOBRIETE.md`.
+    docker run --name pw --memory=192m --memory-swap=192m --cpus=1 -v "$PWD/data:/data" pw-job
 
-Le fichier `data/out/monthly.csv` doit rester identique à celui produit par la version de départ :
-mêmes lignes, mêmes colonnes, même ordre. Un écart d'un centime sur quelques moyennes est toléré
-(les additions de nombres à virgule ne donnent pas exactement le même résultat selon leur ordre).
+Limite = pic mesuré (≈ 129 Mo) × 1,3 à 1,5. Appris : trop juste, le job meurt ; trop large, on bloque de la place pour rien.
 
-Conseil : avant de toucher au code, copiez le résultat de référence.
+### Comparer plusieurs limites de CPU (bonus)
 
-    cp data/out/monthly.csv data/out/reference.csv
+    docker run --name pw --memory=192m --memory-swap=192m --cpus=0.5 -v "$PWD/data:/data" pw-job
 
-## 5. En cas de problème
+Appris : le ratio CPU / réel suit la limite, le temps augmente (3,8 → 11,5 → 50,4 s), rien n'est tué.
 
-- **`Permission denied` sur `/data/out` (Linux)** : le conteneur tourne avec l'utilisateur 1000.
-  `sudo chown -R 1000:1000 data/` ou lancez avec `--user "$(id -u):$(id -g)"`.
-- **Le job s'arrête sans message d'erreur** : regardez le code de sortie et `OOMKilled` (section 2).
-- **Docker Desktop (Mac / Windows)** : vérifiez la RAM allouée à la VM Docker
-  (Settings › Resources). Il faut au moins 4 Go pour la ligne de base.
+## Refaire mes mesures
+
+1. `docker build -t pw-job .`
+2. Générer les données (une fois).
+3. Lancer le job avec les limites voulues et noter les 3 lignes affichées.
+4. `cmp` contre `reference.csv`.
